@@ -1,0 +1,268 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Smart Document Management System - Infrastructure'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, prod]
+    Description: Environment name
+
+Resources:
+  # S3 Bucket for document storage
+  DocumentStorageBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'smart-doc-storage-${Environment}-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ['*']
+            AllowedMethods: [GET, PUT, POST, DELETE]
+            AllowedOrigins: ['*']
+            MaxAge: 3600
+
+  # DynamoDB Table for document metadata
+  DocumentMetadataTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'DocumentMetadata-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: documentId
+          AttributeType: S
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: uploadDate
+          AttributeType: S
+      KeySchema:
+        - AttributeName: documentId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: UserIndex
+          KeySchema:
+            - AttributeName: userId
+              KeyType: HASH
+            - AttributeName: uploadDate
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  # DynamoDB Table for users
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'Users-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: email
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: EmailIndex
+          KeySchema:
+            - AttributeName: email
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  # IAM Role for Lambda functions
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DocumentManagementPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub '${DocumentStorageBucket}/*'
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt DocumentMetadataTable.Arn
+                  - !GetAtt UsersTable.Arn
+              - Effect: Allow
+                Action:
+                  - textract:*
+                  - comprehend:*
+                Resource: '*'
+
+  # Lambda function for document upload
+  DocumentUploadFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'DocumentUpload-${Environment}'
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import uuid
+          from datetime import datetime
+          
+          def handler(event, context):
+              try:
+                  # Generate presigned URL for S3 upload
+                  s3_client = boto3.client('s3')
+                  document_id = str(uuid.uuid4())
+                  
+                  presigned_url = s3_client.generate_presigned_url(
+                      'put_object',
+                      Params={
+                          'Bucket': '${DocumentStorageBucket}',
+                          'Key': f'documents/{document_id}'
+                      },
+                      ExpiresIn=3600
+                  )
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'documentId': document_id,
+                          'uploadUrl': presigned_url
+                      })
+                  }
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({'error': str(e)})
+                  }
+
+  # Lambda function for document processing
+  DocumentProcessingFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'DocumentProcessing-${Environment}'
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import base64
+          from datetime import datetime
+          
+          def handler(event, context):
+              try:
+                  # Process document with Textract and Comprehend
+                  textract_client = boto3.client('textract')
+                  comprehend_client = boto3.client('comprehend')
+                  dynamodb = boto3.resource('dynamodb')
+                  
+                  # Extract text using Textract
+                  response = textract_client.detect_document_text(
+                      Document={'S3Object': {'Bucket': '${DocumentStorageBucket}', 'Key': event['documentKey']}}
+                  )
+                  
+                  extracted_text = ''
+                  for block in response['Blocks']:
+                      if block['BlockType'] == 'LINE':
+                          extracted_text += block['Text'] + '\n'
+                  
+                  # Analyze text with Comprehend
+                  if extracted_text:
+                      sentiment = comprehend_client.detect_sentiment(
+                          Text=extracted_text[:5000],  # Comprehend limit
+                          LanguageCode='en'
+                      )
+                      
+                      entities = comprehend_client.detect_entities(
+                          Text=extracted_text[:5000],
+                          LanguageCode='en'
+                      )
+                      
+                      key_phrases = comprehend_client.detect_key_phrases(
+                          Text=extracted_text[:5000],
+                          LanguageCode='en'
+                      )
+                  
+                  # Update metadata in DynamoDB
+                  table = dynamodb.Table('${DocumentMetadataTable}')
+                  table.update_item(
+                      Key={'documentId': event['documentId']},
+                      UpdateExpression='SET processedAt = :processed_at, extractedText = :text, sentiment = :sentiment, entities = :entities, keyPhrases = :phrases',
+                      ExpressionAttributeValues={
+                          ':processed_at': datetime.utcnow().isoformat(),
+                          ':text': extracted_text,
+                          ':sentiment': sentiment.get('Sentiment', 'UNKNOWN'),
+                          ':entities': entities.get('Entities', []),
+                          ':phrases': key_phrases.get('KeyPhrases', [])
+                      }
+                  )
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({'message': 'Document processed successfully'})
+                  }
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({'error': str(e)})
+                  }
+
+  # API Gateway
+  DocumentAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub 'DocumentManagementAPI-${Environment}'
+      Description: API for Smart Document Management System
+
+  # API Gateway Deployment
+  APIDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: [UploadMethod, ProcessingMethod]
+    Properties:
+      RestApiId: !Ref DocumentAPI
+      StageName: !Ref Environment
+
+Outputs:
+  DocumentStorageBucketName:
+    Description: Name of the S3 bucket for document storage
+    Value: !Ref DocumentStorageBucket
+    Export:
+      Name: !Sub '${Environment}-DocumentStorageBucket'
+
+  DocumentMetadataTableName:
+    Description: Name of the DynamoDB table for document metadata
+    Value: !Ref DocumentMetadataTable
+    Export:
+      Name: !Sub '${Environment}-DocumentMetadataTable'
+
+  APIEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub 'https://${DocumentAPI}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
+    Export:
+      Name: !Sub '${Environment}-APIEndpoint'

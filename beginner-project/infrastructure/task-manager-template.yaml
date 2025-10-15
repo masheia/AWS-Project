@@ -1,0 +1,381 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Simple Task Manager - AWS Beginner Project'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, prod]
+    Description: Environment name
+
+Resources:
+  # DynamoDB Table for tasks
+  TasksTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'Tasks-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: taskId
+          AttributeType: S
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: createdAt
+          AttributeType: S
+      KeySchema:
+        - AttributeName: taskId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: UserIndex
+          KeySchema:
+            - AttributeName: userId
+              KeyType: HASH
+            - AttributeName: createdAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  # S3 Bucket for static website hosting
+  WebsiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'task-manager-website-${Environment}-${AWS::AccountId}'
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+
+  # IAM Role for Lambda functions
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: TaskManagerPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: !GetAtt TasksTable.Arn
+
+  # Lambda function to get all tasks
+  GetTasksFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'GetTasks-${Environment}'
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TasksTable
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime
+          
+          def handler(event, context):
+              try:
+                  dynamodb = boto3.resource('dynamodb')
+                  table = dynamodb.Table(os.environ['TABLE_NAME'])
+                  
+                  # Get query parameters
+                  query_params = event.get('queryStringParameters') or {}
+                  user_id = query_params.get('userId', 'default-user')
+                  status = query_params.get('status')
+                  
+                  # Scan table with optional filters
+                  if status:
+                      response = table.scan(
+                          FilterExpression=boto3.dynamodb.conditions.Attr('userId').eq(user_id) & 
+                                        boto3.dynamodb.conditions.Attr('status').eq(status)
+                      )
+                  else:
+                      response = table.scan(
+                          FilterExpression=boto3.dynamodb.conditions.Attr('userId').eq(user_id)
+                      )
+                  
+                  tasks = response.get('Items', [])
+                  
+                  return {
+                      'statusCode': 200,
+                      'headers': {
+                          'Content-Type': 'application/json',
+                          'Access-Control-Allow-Origin': '*'
+                      },
+                      'body': json.dumps({
+                          'tasks': tasks,
+                          'count': len(tasks)
+                      })
+                  }
+                  
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({'error': str(e)})
+                  }
+
+  # Lambda function to create a task
+  CreateTaskFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'CreateTask-${Environment}'
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TasksTable
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import uuid
+          from datetime import datetime
+          
+          def handler(event, context):
+              try:
+                  dynamodb = boto3.resource('dynamodb')
+                  table = dynamodb.Table(os.environ['TABLE_NAME'])
+                  
+                  # Parse request body
+                  body = json.loads(event['body'])
+                  
+                  task_id = str(uuid.uuid4())
+                  created_at = datetime.utcnow().isoformat()
+                  
+                  # Create task item
+                  task = {
+                      'taskId': task_id,
+                      'userId': body.get('userId', 'default-user'),
+                      'title': body.get('title'),
+                      'description': body.get('description', ''),
+                      'status': 'pending',
+                      'priority': body.get('priority', 'medium'),
+                      'category': body.get('category', 'general'),
+                      'dueDate': body.get('dueDate'),
+                      'createdAt': created_at,
+                      'updatedAt': created_at
+                  }
+                  
+                  # Save to DynamoDB
+                  table.put_item(Item=task)
+                  
+                  return {
+                      'statusCode': 201,
+                      'headers': {
+                          'Content-Type': 'application/json',
+                          'Access-Control-Allow-Origin': '*'
+                      },
+                      'body': json.dumps({
+                          'message': 'Task created successfully',
+                          'task': task
+                      })
+                  }
+                  
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'headers': {
+                          'Content-Type': 'application/json',
+                          'Access-Control-Allow-Origin': '*'
+                      },
+                      'body': json.dumps({'error': str(e)})
+                  }
+
+  # Lambda function to update a task
+  UpdateTaskFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'UpdateTask-${Environment}'
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TasksTable
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime
+          
+          def handler(event, context):
+              try:
+                  dynamodb = boto3.resource('dynamodb')
+                  table = dynamodb.Table(os.environ['TABLE_NAME'])
+                  
+                  # Parse request body and path parameters
+                  body = json.loads(event['body'])
+                  task_id = event['pathParameters']['taskId']
+                  
+                  # Build update expression
+                  update_expression = "SET updatedAt = :updated_at"
+                  expression_attribute_values = {
+                      ':updated_at': datetime.utcnow().isoformat()
+                  }
+                  
+                  # Add fields to update
+                  if 'title' in body:
+                      update_expression += ", title = :title"
+                      expression_attribute_values[':title'] = body['title']
+                  
+                  if 'description' in body:
+                      update_expression += ", description = :description"
+                      expression_attribute_values[':description'] = body['description']
+                  
+                  if 'status' in body:
+                      update_expression += ", status = :status"
+                      expression_attribute_values[':status'] = body['status']
+                  
+                  if 'priority' in body:
+                      update_expression += ", priority = :priority"
+                      expression_attribute_values[':priority'] = body['priority']
+                  
+                  if 'category' in body:
+                      update_expression += ", category = :category"
+                      expression_attribute_values[':category'] = body['category']
+                  
+                  if 'dueDate' in body:
+                      update_expression += ", dueDate = :due_date"
+                      expression_attribute_values[':due_date'] = body['dueDate']
+                  
+                  # Update item in DynamoDB
+                  table.update_item(
+                      Key={'taskId': task_id},
+                      UpdateExpression=update_expression,
+                      ExpressionAttributeValues=expression_attribute_values,
+                      ReturnValues='ALL_NEW'
+                  )
+                  
+                  return {
+                      'statusCode': 200,
+                      'headers': {
+                          'Content-Type': 'application/json',
+                          'Access-Control-Allow-Origin': '*'
+                      },
+                      'body': json.dumps({
+                          'message': 'Task updated successfully',
+                          'taskId': task_id
+                      })
+                  }
+                  
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'headers': {
+                          'Content-Type': 'application/json',
+                          'Access-Control-Allow-Origin': '*'
+                      },
+                      'body': json.dumps({'error': str(e)})
+                  }
+
+  # Lambda function to delete a task
+  DeleteTaskFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'DeleteTask-${Environment}'
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TasksTable
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          
+          def handler(event, context):
+              try:
+                  dynamodb = boto3.resource('dynamodb')
+                  table = dynamodb.Table(os.environ['TABLE_NAME'])
+                  
+                  # Get task ID from path parameters
+                  task_id = event['pathParameters']['taskId']
+                  
+                  # Delete item from DynamoDB
+                  table.delete_item(Key={'taskId': task_id})
+                  
+                  return {
+                      'statusCode': 200,
+                      'headers': {
+                          'Content-Type': 'application/json',
+                          'Access-Control-Allow-Origin': '*'
+                      },
+                      'body': json.dumps({
+                          'message': 'Task deleted successfully',
+                          'taskId': task_id
+                      })
+                  }
+                  
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'headers': {
+                          'Content-Type': 'application/json',
+                          'Access-Control-Allow-Origin': '*'
+                      },
+                      'body': json.dumps({'error': str(e)})
+                  }
+
+Outputs:
+  WebsiteURL:
+    Description: URL of the website
+    Value: !GetAtt WebsiteBucket.WebsiteURL
+    Export:
+      Name: !Sub '${Environment}-WebsiteURL'
+
+  TasksTableName:
+    Description: Name of the DynamoDB table
+    Value: !Ref TasksTable
+    Export:
+      Name: !Sub '${Environment}-TasksTable'
+
+  GetTasksFunctionArn:
+    Description: ARN of the GetTasks Lambda function
+    Value: !GetAtt GetTasksFunction.Arn
+    Export:
+      Name: !Sub '${Environment}-GetTasksFunctionArn'
+
+  CreateTaskFunctionArn:
+    Description: ARN of the CreateTask Lambda function
+    Value: !GetAtt CreateTaskFunction.Arn
+    Export:
+      Name: !Sub '${Environment}-CreateTaskFunctionArn'
+
+  UpdateTaskFunctionArn:
+    Description: ARN of the UpdateTask Lambda function
+    Value: !GetAtt UpdateTaskFunction.Arn
+    Export:
+      Name: !Sub '${Environment}-UpdateTaskFunctionArn'
+
+  DeleteTaskFunctionArn:
+    Description: ARN of the DeleteTask Lambda function
+    Value: !GetAtt DeleteTaskFunction.Arn
+    Export:
+      Name: !Sub '${Environment}-DeleteTaskFunctionArn'

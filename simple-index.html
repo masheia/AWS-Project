@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>AWS Task Manager</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }
+        .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .header { text-align: center; color: #333; margin-bottom: 30px; }
+        .config { background: #fff3cd; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
+        .config input { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 4px; }
+        .btn { background: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; }
+        .btn:hover { background: #0056b3; }
+        .task-form { background: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
+        .form-group { margin-bottom: 15px; }
+        .form-group label { display: block; margin-bottom: 5px; font-weight: bold; }
+        .form-group input, .form-group select, .form-group textarea { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
+        .tasks { margin-top: 20px; }
+        .task-card { background: white; border: 1px solid #ddd; padding: 15px; margin-bottom: 10px; border-radius: 8px; }
+        .error { background: #f8d7da; color: #721c24; padding: 10px; border-radius: 4px; margin-bottom: 10px; }
+        .success { background: #d1edff; color: #0c5460; padding: 10px; border-radius: 4px; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🚀 AWS Task Manager</h1>
+            <p>Serverless Task Management System</p>
+        </div>
+
+        <div class="config">
+            <h3>🔧 API Configuration</h3>
+            <p>Enter your API Gateway URL:</p>
+            <input type="text" id="apiUrl" placeholder="https://your-api-id.execute-api.region.amazonaws.com/dev">
+            <button class="btn" onclick="setApiUrl()">Set API URL</button>
+            <p id="status"></p>
+        </div>
+
+        <div class="task-form">
+            <h3>Add New Task</h3>
+            <div class="form-group">
+                <label>Task Title:</label>
+                <input type="text" id="taskTitle" required>
+            </div>
+            <div class="form-group">
+                <label>Description:</label>
+                <textarea id="taskDescription" rows="3"></textarea>
+            </div>
+            <div class="form-group">
+                <label>Priority:</label>
+                <select id="taskPriority">
+                    <option value="low">Low</option>
+                    <option value="medium" selected>Medium</option>
+                    <option value="high">High</option>
+                </select>
+            </div>
+            <button class="btn" onclick="addTask()">Add Task</button>
+        </div>
+
+        <div class="tasks">
+            <h3>Your Tasks</h3>
+            <button class="btn" onclick="loadTasks()">Refresh Tasks</button>
+            <div id="taskList"></div>
+        </div>
+    </div>
+
+    <script>
+        let API_URL = '';
+        let tasks = [];
+
+        function setApiUrl() {
+            API_URL = document.getElementById('apiUrl').value.trim();
+            if (API_URL) {
+                document.getElementById('status').innerHTML = '✅ API URL set successfully!';
+                document.getElementById('status').style.color = 'green';
+                localStorage.setItem('apiUrl', API_URL);
+                loadTasks();
+            } else {
+                document.getElementById('status').innerHTML = '❌ Please enter a valid API URL';
+                document.getElementById('status').style.color = 'red';
+            }
+        }
+
+        function showMessage(message, type) {
+            const div = document.createElement('div');
+            div.className = type;
+            div.textContent = message;
+            document.querySelector('.container').insertBefore(div, document.querySelector('.config'));
+            setTimeout(() => div.remove(), 3000);
+        }
+
+        async function addTask() {
+            if (!API_URL) {
+                showMessage('Please set your API URL first', 'error');
+                return;
+            }
+
+            const taskData = {
+                userId: 'default-user',
+                title: document.getElementById('taskTitle').value,
+                description: document.getElementById('taskDescription').value,
+                priority: document.getElementById('taskPriority').value,
+                category: 'general'
+            };
+
+            try {
+                const response = await fetch(`${API_URL}/tasks`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(taskData)
+                });
+
+                if (response.ok) {
+                    showMessage('Task added successfully!', 'success');
+                    document.getElementById('taskTitle').value = '';
+                    document.getElementById('taskDescription').value = '';
+                    loadTasks();
+                } else {
+                    throw new Error('Failed to add task');
+                }
+            } catch (error) {
+                showMessage('Error: ' + error.message, 'error');
+            }
+        }
+
+        async function loadTasks() {
+            if (!API_URL) {
+                document.getElementById('taskList').innerHTML = '<p>Please set your API URL first</p>';
+                return;
+            }
+
+            try {
+                const response = await fetch(`${API_URL}/tasks?userId=default-user`);
+                if (response.ok) {
+                    const data = await response.json();
+                    tasks = data.tasks || [];
+                    displayTasks();
+                } else {
+                    throw new Error('Failed to load tasks');
+                }
+            } catch (error) {
+                document.getElementById('taskList').innerHTML = `<p>Error loading tasks: ${error.message}</p>`;
+            }
+        }
+
+        function displayTasks() {
+            const container = document.getElementById('taskList');
+            if (tasks.length === 0) {
+                container.innerHTML = '<p>No tasks found. Add your first task above!</p>';
+                return;
+            }
+
+            container.innerHTML = tasks.map(task => `
+                <div class="task-card">
+                    <h4>${escapeHtml(task.title)}</h4>
+                    <p>${escapeHtml(task.description || 'No description')}</p>
+                    <p><strong>Priority:</strong> ${task.priority} | <strong>Status:</strong> ${task.status}</p>
+                    <button class="btn" onclick="deleteTask('${task.taskId}')">Delete</button>
+                </div>
+            `).join('');
+        }
+
+        async function deleteTask(taskId) {
+            if (!confirm('Delete this task?')) return;
+            
+            try {
+                const response = await fetch(`${API_URL}/tasks/${taskId}`, { method: 'DELETE' });
+                if (response.ok) {
+                    showMessage('Task deleted!', 'success');
+                    loadTasks();
+                } else {
+                    throw new Error('Failed to delete task');
+                }
+            } catch (error) {
+                showMessage('Error: ' + error.message, 'error');
+            }
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Load saved API URL on page load
+        window.onload = function() {
+            const savedApiUrl = localStorage.getItem('apiUrl');
+            if (savedApiUrl) {
+                document.getElementById('apiUrl').value = savedApiUrl;
+                API_URL = savedApiUrl;
+                document.getElementById('status').innerHTML = '✅ API URL loaded';
+                document.getElementById('status').style.color = 'green';
+            }
+        };
+    </script>
+</body>
+</html>

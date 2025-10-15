@@ -1,0 +1,180 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: AWS Task Manager - Serverless Task Management System
+Globals:
+  Function:
+    Timeout: 30
+    Runtime: python3.9
+    Environment:
+      Variables:
+        TABLE_NAME:
+          Ref: TasksTable
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+    - dev
+    - prod
+    Description: Environment name
+Resources:
+  TasksTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName:
+        Fn::Sub: Tasks-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+      - AttributeName: taskId
+        AttributeType: S
+      - AttributeName: userId
+        AttributeType: S
+      - AttributeName: dueDate
+        AttributeType: S
+      KeySchema:
+      - AttributeName: taskId
+        KeyType: HASH
+      GlobalSecondaryIndexes:
+      - IndexName: UserIndex
+        KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: dueDate
+          KeyType: RANGE
+        Projection:
+          ProjectionType: ALL
+  WebsiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        Fn::Sub: task-manager-website-${Environment}-${AWS::AccountId}-oct2025-xyz123
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+  WebsiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: WebsiteBucket
+      PolicyDocument:
+        Statement:
+        - Sid: PublicReadGetObject
+          Effect: Allow
+          Principal: '*'
+          Action: s3:GetObject
+          Resource:
+            Fn::Sub: ${WebsiteBucket}/*
+  GetTasksFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: GetTasks-${Environment}
+      CodeUri: s3://aws-project-deployment-artifacts-2025/8aa10bb7cc0e02997545393a09fcd533
+      Handler: get_tasks.handler
+      Policies:
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: TasksTable
+      Events:
+        GetTasks:
+          Type: Api
+          Properties:
+            Path: /tasks
+            Method: get
+            RestApiId:
+              Ref: TaskManagerAPI
+  CreateTaskFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: CreateTask-${Environment}
+      CodeUri: s3://aws-project-deployment-artifacts-2025/8aa10bb7cc0e02997545393a09fcd533
+      Handler: create_task.handler
+      Policies:
+      - DynamoDBWritePolicy:
+          TableName:
+            Ref: TasksTable
+      Events:
+        CreateTask:
+          Type: Api
+          Properties:
+            Path: /tasks
+            Method: post
+            RestApiId:
+              Ref: TaskManagerAPI
+  UpdateTaskFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: UpdateTask-${Environment}
+      CodeUri: s3://aws-project-deployment-artifacts-2025/8aa10bb7cc0e02997545393a09fcd533
+      Handler: update_task.handler
+      Policies:
+      - DynamoDBWritePolicy:
+          TableName:
+            Ref: TasksTable
+      Events:
+        UpdateTask:
+          Type: Api
+          Properties:
+            Path: /tasks/{taskId}
+            Method: put
+            RestApiId:
+              Ref: TaskManagerAPI
+  DeleteTaskFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: DeleteTask-${Environment}
+      CodeUri: s3://aws-project-deployment-artifacts-2025/8aa10bb7cc0e02997545393a09fcd533
+      Handler: delete_task.handler
+      Policies:
+      - DynamoDBWritePolicy:
+          TableName:
+            Ref: TasksTable
+      Events:
+        DeleteTask:
+          Type: Api
+          Properties:
+            Path: /tasks/{taskId}
+            Method: delete
+            RestApiId:
+              Ref: TaskManagerAPI
+  TaskManagerAPI:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName:
+        Ref: Environment
+      Cors:
+        AllowMethods: '''GET,POST,PUT,DELETE,OPTIONS'''
+        AllowHeaders: '''Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'''
+        AllowOrigin: '''*'''
+Outputs:
+  WebsiteURL:
+    Description: URL of the website
+    Value:
+      Fn::GetAtt:
+      - WebsiteBucket
+      - WebsiteURL
+    Export:
+      Name:
+        Fn::Sub: ${Environment}-WebsiteURL-oct2025
+  ApiGatewayURL:
+    Description: API Gateway endpoint URL
+    Value:
+      Fn::Sub: https://${TaskManagerAPI}.execute-api.${AWS::Region}.amazonaws.com/${Environment}
+    Export:
+      Name:
+        Fn::Sub: ${Environment}-ApiGatewayURL-oct2025
+  TasksTableName:
+    Description: Name of the DynamoDB table
+    Value:
+      Ref: TasksTable
+    Export:
+      Name:
+        Fn::Sub: ${Environment}-TasksTable-oct2025
