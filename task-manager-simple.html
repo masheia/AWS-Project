@@ -267,7 +267,7 @@
                     <div style="margin-top: 10px;">
                         ${task.status !== 'completed' ? 
                             `<button class="btn btn-success" onclick="markComplete('${task.taskId}')" style="margin-right: 10px;">Mark Complete</button>` : 
-                            `<span style="color: #28a745; font-weight: bold;">✓ Completed</span>`
+                            `<span style="color: #28a745; font-weight: bold;">[COMPLETED]</span>`
                         }
                         <button class="btn btn-danger" onclick="deleteTask('${task.taskId}')">Delete</button>
                     </div>
